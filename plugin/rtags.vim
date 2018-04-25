@@ -303,6 +303,12 @@ function! rtags#DisplayResults(results)
     call rtags#DisplayLocations(locations)
 endfunction
 
+function! rtags#SetupMappings(results)
+    if g:rtagsUseLocationList == 1
+        nnoremap <buffer> o :call <SID>ExpandReferences()<CR>
+    endif
+endfunction
+
 "
 " Creates a tree viewer for references to a symbol
 "
@@ -336,23 +342,27 @@ function! rtags#ViewReferences(results)
     let &cpo = cpo_save
 endfunction
 
+function! rtags#AddParents(result)
+    let parentLocation = rtags#GetParentLocation(a:result)
+    call rtags#ExecuteThen(
+      \ {
+        \ '-r': parentLocation,
+        \ '--containing-function': ''},
+      \ [function('rtags#AddReferences')])
+endfunction
+
 "
 " Expands the callers of the reference on the current line.
 "
 function! s:ExpandReferences() " <<<
-    let ln = line(".")
-    let l = getline(ln)
+    let entry = getloclist(0)[line(".") - 1]
 
-    " Detect expandable region
-    let nr = matchlist(l, '#\([0-9]\+\)$')[1]
-    if !empty(b:rtagsLocations[nr].source)
-        let location = b:rtagsLocations[nr].source
-        let b:rtagsLocations[nr].source = ''
-        let args = {
-                \ '--containing-function-location' : '',
-                \ '-r' : location }
-        call rtags#ExecuteThen(args, [[function('rtags#AddReferences'), nr]])
-    endif
+    let args = {
+      \ '-U': getcwd() . '/' . bufname(entry.bufnr)
+        \ . ':' . entry.lnum . ':' . entry.col,
+      \ '--symbol-info-include-parents' : '' }
+
+    call rtags#ExecuteThen(args, [function('rtags#AddParents')])
 endfunction " >>>
 
 "
@@ -385,38 +395,8 @@ endfunction " >>>
 " param[in] i - The index of the reference the added references are calling or -1
 "
 " Format of each line: <path>,<line>\s<text>\sfunction: <caller path>
-function! rtags#AddReferences(results, i)
-    let ln = line(".")
-    let nr = len(b:rtagsLocations)
-    let depth = 0
-    if a:i >= 0
-        let depth = b:rtagsLocations[a:i].depth + 1
-        silent execute "normal! gg/#".a:i."$\<cr>"
-    endif
-    let prefix = repeat(" ", depth * 2)
-    setlocal modifiable
-    for record in a:results
-        let [line; sourcefunc] = split(record, '\s\+function: ')
-        let [location; rest] = split(line, '\s\+')
-        let [file, lnum, col] = rtags#parseSourceLocation(location)
-        let entry = {}
-        let entry.filename = substitute(file, getcwd().'/', '', 'g')
-        let entry.filepath = file
-        let entry.lnum = lnum
-        let entry.col = col
-        let entry.vcol = 0
-        let entry.text = join(rest, ' ')
-        let entry.type = 'ref'
-        let entry.depth = depth
-        let entry.source = matchstr(sourcefunc, '[^\s]\+')
-        " TODO Hide the index number of the entry - this is an implementation
-        " detail that shouldn't be visible to the user.
-        silent execute "normal! A\<cr>\<esc>i".prefix . substitute(entry.filename, '.*/', '', 'g').':'.entry.lnum.' '.entry.text.' #'.nr."\<esc>"
-        call add(b:rtagsLocations, entry)
-        let nr = nr + 1
-    endfor
-    setlocal nomodifiable
-    exec (":" . ln)
+function! rtags#AddReferences(results)
+    call setloclist(0, extend(getloclist(0), rtags#ParseResults(a:results), line(".")))
 endfunction
 
 function! rtags#getRcCmd()
@@ -548,6 +528,19 @@ function! rtags#JumpBack()
     else
         echo "rtags: jump stack is empty"
     endif
+endfunction
+
+function! rtags#GetParentLocation(results)
+    for line in a:results
+        let matched = matchend(line, "^Parent: ")
+        if matched == -1
+            continue
+        endif
+        let [jump_file, lnum, col] = rtags#parseSourceLocation(line[matched:-1])
+        if !empty(jump_file)
+            return jump_file . ':' . lnum . ':' . col
+        endif
+    endfor
 endfunction
 
 function! rtags#JumpToParentHandler(results)
@@ -748,11 +741,12 @@ function! rtags#FindRefs()
 endfunction
 
 function! rtags#FindRefsCallTree()
-    let args = {
-                \ '--containing-function-location' : '',
-                \ '-r' : rtags#getCurrentLocation() }
+    let args = { '-r': rtags#getCurrentLocation(),
+      \ '--containing-function': ''}
 
-    call rtags#ExecuteThen(args, [function('rtags#ViewReferences')])
+    call rtags#ExecuteThen(args, [
+      \ function('rtags#DisplayResults'),
+      \ function('rtags#SetupMappings')])
 endfunction
 
 function! rtags#FindSuperClasses()
